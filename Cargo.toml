@@ -1,0 +1,18 @@
+[package]
+name = "chat-gpt-rust-server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.26.0", features = ["full"] }
+sqlx={version="0.6", features=["postgres", "runtime-tokio-rustls"]}
+actix-web = "4.3.1"
+env_logger = "0.10.0"
+serde = { version = "1.0.158", features = ["derive"] }
+actix-cors = "0.6.4"
+dotenv = "0.15.0"
+jsonwebtoken = "8.3.0"
+argon2 = "0.5.0"
+rand = "0.8.5"

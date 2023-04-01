@@ -1,4 +1,11 @@
-use actix_web::{App, web, HttpResponse, HttpServer, Responder, post};
+use actix_web::{
+    App, 
+    web, 
+    HttpResponse, 
+    HttpServer, 
+    Responder,
+    post,
+};
 use argon2::{ 
     password_hash::{
         rand_core::OsRng,
@@ -8,22 +15,29 @@ use argon2::{
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, postgres::PgPoolOptions, Postgres, Pool};
+use sqlx::{postgres::PgPoolOptions, Postgres, Pool, FromRow};
 // use rand::self;
 
 const SECRET_KEY: &[u8] = b"my_secret_key"; // Change this to a secret key of your choice
-const DATABASE_URL: &str = "postgres://admin:password123@127.0.0.1:6500/book"; // Change this to your PostgreSQL database URL
+const DATABASE_URL: &str = "postgres://admin:password123@127.0.0.1:6500/gpt"; // Change this to your PostgreSQL database URL
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 struct User {
-    id: i32,
+    // id:i32;
+    username:String,
     email: String,
     password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+struct UserLogin {
+    email: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 struct JwtPayload {
-    sub: i32,
+    // sub: i32,
+    sub:String,
 }
 
 pub struct AppState{
@@ -33,49 +47,51 @@ pub struct AppState{
 #[post("/auth/register")]
 async fn register_user(
     user: web::Json<User>,
-    pool: web::Data<PgPool>,
+    pool: web::Data<AppState>,
 ) -> impl Responder {
-    let mut hasher = Argon2::default();
+    let hasher = Argon2::default();
     let salt = SaltString::generate(&mut OsRng);
     let hash = hasher
         .hash_password(user.password.as_bytes(), &salt)
         .unwrap()
         .to_string();
 
-    let result = sqlx::query!(
-        "INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id",
-        user.email,
-        hash,
+    match sqlx::query_as::<_,User>(
+        "INSERT INTO users ( email, password, username) VALUES ($1, $2, $3) RETURNING *",
     )
-    .fetch_one(pool.get_ref())
-    .await;
+    // .bind(user.id.to_string())
+    .bind(user.email.to_string())
+    .bind(hash.to_string())
+    .bind(user.username.to_string())
+    .fetch_one(&pool.db)
+    .await
 
-    match result {
-        Ok(row) => HttpResponse::Ok().body(row.id.to_string()),
-        Err(_) => HttpResponse::InternalServerError().finish(),
+    {
+        Ok(row) => HttpResponse::Ok().json(row),
+        Err(err) => HttpResponse::InternalServerError().json(&err.to_string()),
     }
 }
 
 #[post("/auth/login")]
 async fn login_user(
     user: web::Json<User>,
-    pool: web::Data<PgPool>,
+    pool: web::Data<AppState>,
 ) -> impl Responder {
-    let result = sqlx::query!(
-        "SELECT * FROM users WHERE email = $1",
-        user.email,
+   match sqlx::query_as::<_,User>(
+        "SELECT email FROM users WHERE email = $1 RETURNING *",
     )
-    .fetch_one(pool.get_ref())
-    .await;
+    .bind(user.email.to_string())
+    .fetch_one(&pool.db)
+    .await
 
-    match result {
+    {
         Ok(row) => {
             let hasher = Argon2::default();
             let password_hash = PasswordHash::new(row.password.as_str()).unwrap();
 
             match hasher.verify_password(user.password.as_bytes(), &password_hash) {
                 Ok(_) => {
-                    let payload = JwtPayload { sub: row.id };
+                    let payload = JwtPayload { sub: row.email};
                     let token = encode(
                         &Header::default(),
                         &payload,
@@ -84,10 +100,10 @@ async fn login_user(
                     .unwrap();
                     HttpResponse::Ok().body(token)
                 },
-                Err(_) => HttpResponse::Unauthorized().finish(),
+                Err(err) => HttpResponse::Unauthorized().json(&err.to_string()),
             }
         },
-        Err(_) => HttpResponse::Unauthorized().finish(),
+        Err(err) => HttpResponse::Unauthorized().json(&err.to_string()),
     }
 }
 

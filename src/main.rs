@@ -23,7 +23,6 @@ const DATABASE_URL: &str = "postgres://admin:password123@127.0.0.1:6500/gpt"; //
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 struct User {
-    // id:i32;
     username:String,
     email: String,
     password: String,
@@ -59,7 +58,6 @@ async fn register_user(
     match sqlx::query_as::<_,User>(
         "INSERT INTO users ( email, password, username) VALUES ($1, $2, $3) RETURNING *",
     )
-    // .bind(user.id.to_string())
     .bind(user.email.to_string())
     .bind(hash.to_string())
     .bind(user.username.to_string())
@@ -74,11 +72,11 @@ async fn register_user(
 
 #[post("/auth/login")]
 async fn login_user(
-    user: web::Json<User>,
+    user: web::Json<UserLogin>,
     pool: web::Data<AppState>,
 ) -> impl Responder {
    match sqlx::query_as::<_,User>(
-        "SELECT email FROM users WHERE email = $1 RETURNING *",
+        "SELECT email FROM users WHERE email = $1",
     )
     .bind(user.email.to_string())
     .fetch_one(&pool.db)
@@ -134,6 +132,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
         .app_data(web::Data::new(AppState {db:pool.clone()}))
         .service(register_user)
+        .service(login_user)
     })
     .bind(("127.0.0.1",8000))?
     .run()

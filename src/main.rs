@@ -1,140 +1,81 @@
-use actix_web::{
-    App, 
-    web, 
-    HttpResponse, 
-    HttpServer, 
-    Responder,
-    post,
-};
-use argon2::{ 
-    password_hash::{
-        rand_core::OsRng,
-        PasswordHash, PasswordHasher, PasswordVerifier, SaltString
-    },
-    Argon2
-};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, Postgres, Pool, FromRow};
-// use rand::self;
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use argon2::{self, Config};
+use jsonwebtoken::{encode, Header, EncodingKey};
+use sqlx::{postgres::PgPool, Pool, Postgres};
 
-const SECRET_KEY: &[u8] = b"my_secret_key"; // Change this to a secret key of your choice
-const DATABASE_URL: &str = "postgres://admin:password123@127.0.0.1:6500/gpt"; // Change this to your PostgreSQL database URL
-
-#[derive(Debug, Serialize, Deserialize, FromRow)]
+// Define a user struct
+#[derive(sqlx::FromRow)]
 struct User {
-    username:String,
-    email: String,
+    username: String,
     password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow)]
-struct UserLogin {
-    email: String,
+// Define a JWT Claims struct
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct Claims {
+    sub: String,
+    exp: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow)]
-struct JwtPayload {
-    // sub: i32,
-    sub:String,
+// Define a login struct
+#[derive(serde::Deserialize, sqlx::FromRow, serde::Serialize)]
+struct Login {
+    username: String,
+    password: String,
 }
 
-pub struct AppState{
-    db:Pool<Postgres>
-} 
-
-#[post("/auth/register")]
-async fn register_user(
-    user: web::Json<User>,
-    pool: web::Data<AppState>,
+async fn login(
+    login: web::Json<Login>,
+    pool: web::Data<PgPool>,
 ) -> impl Responder {
-    let hasher = Argon2::default();
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = hasher
-        .hash_password(user.password.as_bytes(), &salt)
-        .unwrap()
-        .to_string();
+    let username = login.username.clone();
+    let password = login.password.clone();
+    
+    let user = sqlx::query_as::<_, User>(
+            "SELECT * FROM users WHERE username = $1"
+        )
+        .bind(username)
+        .fetch_one(pool.as_ref())
+        .await;
 
-    match sqlx::query_as::<_,User>(
-        "INSERT INTO users ( email, password, username) VALUES ($1, $2, $3) RETURNING *",
-    )
-    .bind(user.email.to_string())
-    .bind(hash.to_string())
-    .bind(user.username.to_string())
-    .fetch_one(&pool.db)
-    .await
+    if let Ok(user) = user {
+        let password_match = argon2::verify_encoded(&user.password, password.as_bytes()).unwrap_or(false);
 
-    {
-        Ok(row) => HttpResponse::Ok().json(row),
-        Err(err) => HttpResponse::InternalServerError().json(&err.to_string()),
+        if password_match {
+            let expiration = chrono::Utc::now()
+                .checked_add_signed(chrono::Duration::minutes(30))
+                .unwrap()
+                .timestamp();
+
+            let claims = Claims {
+                sub: user.email.to_string(),
+                exp: expiration as usize,
+            };
+
+            let token = encode(&Header::default(), &claims, &EncodingKey::from_secret("secret".as_ref())).unwrap();
+
+            return HttpResponse::Ok().json(token);
+        }
     }
-}
 
-#[post("/auth/login")]
-async fn login_user(
-    user: web::Json<UserLogin>,
-    pool: web::Data<AppState>,
-) -> impl Responder {
-   match sqlx::query_as::<_,User>(
-        "SELECT email FROM users WHERE email = $1",
-    )
-    .bind(user.email.to_string())
-    .fetch_one(&pool.db)
-    .await
-
-    {
-        Ok(row) => {
-            let hasher = Argon2::default();
-            let password_hash = PasswordHash::new(row.password.as_str()).unwrap();
-
-            match hasher.verify_password(user.password.as_bytes(), &password_hash) {
-                Ok(_) => {
-                    let payload = JwtPayload { sub: row.email};
-                    let token = encode(
-                        &Header::default(),
-                        &payload,
-                        &EncodingKey::from_secret(SECRET_KEY),
-                    )
-                    .unwrap();
-                    HttpResponse::Ok().body(token)
-                },
-                Err(err) => HttpResponse::Unauthorized().json(&err.to_string()),
-            }
-        },
-        Err(err) => HttpResponse::Unauthorized().json(&err.to_string()),
-    }
-}
-
-async fn auth_handler(
-    token: web::Json<String>,
-) -> impl Responder {
-    let token_data = decode::<JwtPayload>(
-        &token,
-        &DecodingKey::from_secret(SECRET_KEY),
-        &Validation::default(),
-    );
-
-    match token_data {
-        Ok(_) => HttpResponse::Ok().finish(),
-        Err(_) => HttpResponse::Unauthorized().finish(),
-    }
+    HttpResponse::Unauthorized().finish()
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(DATABASE_URL)
+    let pool = PgPool::connect("postgres://user:password@localhost/mydb")
         .await
-        .unwrap();
+        .expect("Failed to connect to database");
 
-    HttpServer::new(move||{
+    HttpServer::new(move || {
         App::new()
-        .app_data(web::Data::new(AppState {db:pool.clone()}))
-        .service(register_user)
-        .service(login_user)
+            .data(pool.clone())
+            .service(
+                web::resource("/login")
+                    .route(web::post().to(login)),
+            )
     })
-    .bind(("127.0.0.1",8000))?
+    .bind("127.0.0.1:8080")?
     .run()
     .await
 }
